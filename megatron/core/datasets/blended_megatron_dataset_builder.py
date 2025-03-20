@@ -4,6 +4,7 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterable, List, Optional, Type, Union
+import os
 
 import numpy
 import torch
@@ -388,7 +389,7 @@ class BlendedMegatronDatasetBuilder(object):
         num_dataset_builder_threads = self.config.num_dataset_builder_threads
 
         if torch.distributed.is_initialized():
-            rank = torch.distributed.get_rank()
+            rank = int(os.getenv("LOCAL_RANK", "0"))
             # First, build on rank 0
             if rank == 0:
                 num_workers = num_dataset_builder_threads
@@ -517,7 +518,7 @@ class BlendedMegatronDatasetBuilder(object):
                 Iterable instantiation, or None
         """
         if torch.distributed.is_initialized():
-            rank = torch.distributed.get_rank()
+            rank = int(os.getenv("LOCAL_RANK", "0"))
 
             dataset = None
 
