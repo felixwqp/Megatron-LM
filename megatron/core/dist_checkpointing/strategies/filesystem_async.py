@@ -5,7 +5,9 @@ import dataclasses
 import gc
 import logging
 import os
+import io
 import queue
+import sys
 from contextlib import contextmanager
 from heapq import heappop, heappush
 from itertools import chain
@@ -51,7 +53,43 @@ def _disable_gc():
             gc.enable()
 
 
-class FileSystemWriterAsync(FileSystemWriter):
+class FileSystemRemoteWriter(FileSystemWriter):
+    """
+    In addition to write to local RAM-disk, write to remote storage(GCS, PD) as well.
+
+    this class maybe used as part of the `FileSystemWriterAsync`.
+    """
+    def __init__(self, *args, **kwargs):
+        print("Init FileSystemRemoteWriter, TODO: please setup the remote storage backend.")
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    @_disable_gc()
+    def get_data_size(data: Union[io.BytesIO, torch.Tensor]):
+        if isinstance(data, io.BytesIO):
+            return sys.getsizeof(data)
+        elif isinstance(data, torch.Tensor):
+            return data.element_size() * data.nelement()
+
+    @staticmethod
+    @_disable_gc()
+    def local_write_item(
+        stream: io.IOBase,
+        data: Union[io.BytesIO, torch.Tensor],
+        write_item: WriteItem,
+        storage_key: str,
+    ) -> WriteResult:
+        start = time()
+        write_res = _write_item(stream, data, write_item, storage_key)
+        end = time()
+        logger.debug(
+            f"size {FileSystemRemoteWriter.get_data_size(data)} bytes individual_storage_write_latency: {end - start}s."
+        )
+        return write_res
+
+
+
+class FileSystemWriterAsync(FileSystemRemoteWriter):
     """
     Async-enabled implementation of FileSystemWriter using file IO.
 
@@ -290,16 +328,18 @@ class FileSystemWriterAsync(FileSystemWriter):
         """
         mem_before = _process_memory()
 
+        start = time()
+
         local_results = []
         try:
             file_name, storage_key, (bytes_data, tensor_data) = write_bucket
             with open(file_name, "wb") as stream:
                 for write_item, data in bytes_data:
-                    local_results.append(_write_item(stream, data, write_item, storage_key))
+                    local_results.append(FileSystemRemoteWriter.local_write_item(stream, data, write_item, storage_key))
 
                 for write_item, tensor in tensor_data:
                     assert tensor.is_cpu
-                    local_results.append(_write_item(stream, tensor, write_item, storage_key))
+                    local_results.append(FileSystemRemoteWriter.local_write_item(stream, tensor, write_item, storage_key))
 
                 if use_fsync:
                     os.fsync(stream.fileno())
@@ -307,6 +347,10 @@ class FileSystemWriterAsync(FileSystemWriter):
         except Exception as e:
             local_output = (local_proc_idx, e)
 
+        end = time()
+        logger.debug(
+            f"{local_proc_idx} overall_storage_write_latency: {end - start}s."
+        )
         results_queue.put(local_output)
         # Signal this process is done.
         count_queue.get()
