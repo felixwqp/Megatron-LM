@@ -20,7 +20,7 @@ import psutil
 import torch
 from torch import multiprocessing as mp
 from torch.distributed.checkpoint import FileSystemWriter
-from torch.distributed.checkpoint.filesystem import DEFAULT_SUFFIX, _StoragePrefix, _write_item
+from torch.distributed.checkpoint.filesystem import DEFAULT_SUFFIX, _StoragePrefix, _write_item, _StorageInfo
 from torch.distributed.checkpoint.planner import SavePlan, SavePlanner, WriteItem, WriteItemType
 from torch.distributed.checkpoint.storage import WriteResult
 from torch.futures import Future
@@ -79,12 +79,37 @@ class FileSystemRemoteWriter(FileSystemWriter):
         write_item: WriteItem,
         storage_key: str,
     ) -> WriteResult:
-        start = time()
-        write_res = _write_item(stream, data, write_item, storage_key)
-        end = time()
-        logger.debug(
-            f"size {FileSystemRemoteWriter.get_data_size(data)} bytes individual_storage_write_latency: {end - start}s."
-        )
+        # write_res = _write_item(stream, data, write_item, storage_key)
+        if write_item.type == WriteItemType.BYTE_IO:
+            assert isinstance(data, io.BytesIO)
+            write_res = _write_item(stream, data, write_item, storage_key)
+        else:
+            assert isinstance(data, torch.Tensor)
+            assert data.device == torch.device("cpu")
+            # serialize checkpoint into memory
+            bytes = io.BytesIO()
+            start = time()
+            torch.save(data, bytes)
+            end = time()
+            logger.debug(
+                    f"size {FileSystemRemoteWriter.get_data_size(data)} bytes individual_storage_serialize_latency: {(end - start):.9f}s."
+            )
+            # write the byte io buffer to storage.
+            start = time()
+            offset = stream.tell()
+            stream.write(bytes.read())
+            length = stream.tell() - offset
+            end = time()
+            logger.debug(
+                    f"size {FileSystemRemoteWriter.get_data_size(data)} bytes individual_storage_byte_write_latency: {(end - start):.9f}s."
+            )
+
+            write_res = WriteResult(
+                    index=write_item.index,
+                    size_in_bytes=length,
+                    storage_data=_StorageInfo(storage_key, offset, length),
+                    )
+
         return write_res
 
 
